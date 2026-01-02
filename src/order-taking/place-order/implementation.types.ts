@@ -1,11 +1,18 @@
+import * as Context from 'effect/Context';
+import * as Effect from 'effect/Effect';
 import { Option } from 'fp-ts/Option';
 import { PhantomBrand, Wrapper } from '../../libs/brand';
 import { bound } from '../../libs/decorator';
 import { Entity, ValueObject } from '../../libs/model-type';
 
-import type { OrderAcknowledgmentSent, PlaceOrderEvent, PricedOrder, UnvalidatedAddress, PricingError } from './public-types';
-import type * as TE from 'fp-ts/TaskEither'
-import type * as E from 'fp-ts/Either'
+import type {
+  OrderAcknowledgmentSent,
+  PlaceOrderEvent,
+  PricedOrder,
+  RemoteServiceError,
+  UnvalidatedAddress,
+  PricingError,
+} from './public-types';
 import type { Address, CustomerInfo, EmailAddress, OrderId, OrderLineId, OrderQuantity, Price, ProductCode } from '../common-types';
 
 // ======================================================
@@ -27,16 +34,29 @@ export class AddressNotFound {
 
 // Address validation
 export type AddressValidationError = InvalidFormat | AddressNotFound;
-// Product validation
-
-export type CheckProductCodeExists = (i: ProductCode) => boolean;
 
 // Address validation
 declare const checkedAddress: unique symbol;
 export type CheckedAddress = PhantomBrand<UnvalidatedAddress, typeof checkedAddress>;
 export const createCheckedAddress = (i: UnvalidatedAddress) => i as CheckedAddress;
 
-export type CheckAddressExists = (i: UnvalidatedAddress) => TE.TaskEither<AddressValidationError, CheckedAddress>;
+// Legacy function types (for pure/legacy implementations)
+export type CheckProductCodeExists = (i: ProductCode) => boolean;
+export type GetProductPrice = (i: ProductCode) => Price;
+export type CreateOrderAcknowledgmentLetter = (i: PricedOrder) => HtmlString;
+export type SendOrderAcknowledgment = (i: OrderAcknowledgement) => SendResult;
+
+export interface ProductCatalog {
+  check(productCode: ProductCode): Effect.Effect<boolean, RemoteServiceError>;
+}
+
+export class ProductCatalogService extends Context.Tag('ProductCatalog')<ProductCatalogService, ProductCatalog>() { }
+
+export interface AddressVerification {
+  check(address: UnvalidatedAddress): Effect.Effect<CheckedAddress, AddressValidationError | RemoteServiceError>;
+}
+
+export class AddressVerificationService extends Context.Tag('AddressVerification')<AddressVerificationService, AddressVerification>() { }
 
 // ---------------------------
 // Validated Order
@@ -86,9 +106,11 @@ export class ValidatedOrder extends Entity<OrderId> {
 // Pricing step
 // ---------------------------
 
-export type GetProductPrice = (i: ProductCode) => Price;
+export interface Pricing {
+  getPrice(productCode: ProductCode): Effect.Effect<Price, PricingError | RemoteServiceError>;
+}
 
-export type PriceOrder = (dep: GetProductPrice) => (i: ValidatedOrder) => E.Either<PricingError, PricedOrder>; // output
+export class PricingService extends Context.Tag('Pricing')<PricingService, Pricing>() { }
 
 // ---------------------------
 // Send OrderAcknowledgment
@@ -107,26 +129,24 @@ export class OrderAcknowledgement extends ValueObject {
   ) { super() }
 }
 
-export type CreateOrderAcknowledgmentLetter = (i: PricedOrder) => HtmlString;
-
-/// Send the order acknowledgement to the customer
-/// Note that this does NOT generate an Result-type error (at least not in this workflow)
-/// because on failure we will continue anyway.
-/// On success, we will generate a OrderAcknowledgmentSent event,
-/// but on failure we won't.
-
 export const Sent = 'Sent' as const;
 export const NotSent = 'NotSent' as const;
 type SendResult = typeof Sent | typeof NotSent;
 
-export type SendOrderAcknowledgment = (i: OrderAcknowledgement) => SendResult;
+export interface OrderAcknowledgmentLetter {
+  create(order: PricedOrder): Effect.Effect<HtmlString>;
+}
 
-export type AcknowledgeOrder = (
-  dep1: CreateOrderAcknowledgmentLetter,
-  dep2: SendOrderAcknowledgment, // dependency
-) => (
-  i: PricedOrder, // input
-) => Option<OrderAcknowledgmentSent>; // output
+export class OrderAcknowledgmentLetterService extends Context.Tag('OrderAcknowledgmentLetter')<OrderAcknowledgmentLetterService, OrderAcknowledgmentLetter>() { }
+
+export interface OrderAcknowledgmentSender {
+  send(acknowledgment: OrderAcknowledgement): Effect.Effect<SendResult, RemoteServiceError>;
+}
+
+export class OrderAcknowledgmentSenderService extends Context.Tag('OrderAcknowledgmentSender')<OrderAcknowledgmentSenderService, OrderAcknowledgmentSender>() { }
+
+export type AcknowledgeOrder =
+  (i: PricedOrder) => Effect.Effect<Option<OrderAcknowledgmentSent>, RemoteServiceError, OrderAcknowledgmentLetterService | OrderAcknowledgmentSenderService>;
 
 // ---------------------------
 // Create events
@@ -136,3 +156,18 @@ export type CreateEvents = (
   i1: PricedOrder,
   i2: Option<OrderAcknowledgmentSent>, // input (event from previous step)
 ) => PlaceOrderEvent[]; // output
+
+export type ValidationEnv =
+  | ProductCatalogService
+  | AddressVerificationService;
+
+export type PricingEnv = PricingService;
+
+export type AcknowledgmentEnv =
+  | OrderAcknowledgmentLetterService
+  | OrderAcknowledgmentSenderService;
+
+export type PlaceOrderEnv =
+  | ValidationEnv
+  | PricingEnv
+  | AcknowledgmentEnv;

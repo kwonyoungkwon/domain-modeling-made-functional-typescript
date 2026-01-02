@@ -1,31 +1,32 @@
-import { pipe } from 'fp-ts/function';
+import * as Effect from 'effect/Effect';
+import { pipe } from 'effect/Function';
 import * as O from 'fp-ts/Option';
 import { match } from 'ts-pattern';
-import { NotSent, OrderAcknowledgement, Sent } from './implementation.types';
-import { BillableOrderPlaced, OrderAcknowledgmentSent, OrderPlaced } from './public-types';
+import { NotSent, OrderAcknowledgement, OrderAcknowledgmentLetterService, OrderAcknowledgmentSenderService, Sent } from './implementation.types';
+import { BillableOrderPlaced, OrderAcknowledgmentSent, OrderPlaced, RemoteServiceError } from './public-types';
 
-import type {
-  AcknowledgeOrder,
-  CreateEvents,
-  CreateOrderAcknowledgmentLetter,
-  SendOrderAcknowledgment,
-} from './implementation.types';
+import type { AcknowledgeOrder, AcknowledgmentEnv, CreateEvents } from './implementation.types';
 import type { PlaceOrderEvent, PricedOrder } from './public-types';
 
 // ---------------------------
 // AcknowledgeOrder step
 // ---------------------------
 
-export const acknowledgeOrder: AcknowledgeOrder = (createAcknowledgmentLetter, sendAcknowledgment) => pricedOrder => {
-  const letter = createAcknowledgmentLetter(pricedOrder);
-  const acknowledgment = new OrderAcknowledgement(pricedOrder.customerInfo.emailAddress, letter);
-  // if the acknowledgement was successfully sent,
-  // return the corresponding event, else return None
-  return match(sendAcknowledgment(acknowledgment))
-    .with(Sent, () => O.some(new OrderAcknowledgmentSent(pricedOrder.orderId, pricedOrder.customerInfo.emailAddress)))
-    .with(NotSent, () => O.none)
-    .exhaustive();
-};
+export const acknowledgeOrder: AcknowledgeOrder = pricedOrder =>
+  Effect.gen(function* (_) {
+    const letterService = yield* _(OrderAcknowledgmentLetterService);
+    const sender = yield* _(OrderAcknowledgmentSenderService);
+
+    const letter = yield* _(letterService.create(pricedOrder));
+    const acknowledgment = new OrderAcknowledgement(pricedOrder.customerInfo.emailAddress, letter);
+
+    const result = yield* _(sender.send(acknowledgment));
+
+    return match(result)
+      .with(Sent, () => O.some(new OrderAcknowledgmentSent(pricedOrder.orderId, pricedOrder.customerInfo.emailAddress)))
+      .with(NotSent, () => O.none)
+      .exhaustive();
+  });
 
 // ---------------------------
 // Create events
@@ -66,10 +67,8 @@ export const createEvents: CreateEvents = (pricedOrder, acknowledgmentEventOpt) 
   ),
 ];
 
-export const placeOrderEvents = (
-  createOrderAcknowledgmentLetter: CreateOrderAcknowledgmentLetter,
-  sendOrderAcknowledgment: SendOrderAcknowledgment,
-) => (pricedOrder: PricedOrder): PlaceOrderEvent[] => {
-  const ackOpt = acknowledgeOrder(createOrderAcknowledgmentLetter, sendOrderAcknowledgment)(pricedOrder);
-  return createEvents(pricedOrder, ackOpt);
-};
+export const placeOrderEvents = (pricedOrder: PricedOrder): Effect.Effect<PlaceOrderEvent[], RemoteServiceError, AcknowledgmentEnv> =>
+  Effect.map(
+    acknowledgeOrder(pricedOrder),
+    ackOpt => createEvents(pricedOrder, ackOpt),
+  );

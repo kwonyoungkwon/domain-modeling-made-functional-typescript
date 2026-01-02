@@ -9,17 +9,20 @@
 import * as A from 'fp-ts/Array';
 import * as E from 'fp-ts/Either';
 import { flow, pipe } from 'fp-ts/function';
-import * as TE from 'fp-ts/TaskEither';
+import * as Effect from 'effect/Effect';
+import * as Layer from 'effect/Layer';
 import { Price } from '../common-types';
 import { OrderFormDto, PlaceOrderErrorDto, placeOrderEventDtoFromDomain } from './dto';
-import { createCheckedAddress, HtmlString, Sent } from './implementation.types';
-
-import type {
-  CheckAddressExists,
-  CheckProductCodeExists,
-  CreateOrderAcknowledgmentLetter,
-  GetProductPrice,
-  SendOrderAcknowledgment,
+import { ValidationError } from './public-types';
+import {
+  AddressVerificationService,
+  HtmlString,
+  OrderAcknowledgmentLetterService,
+  OrderAcknowledgmentSenderService,
+  ProductCatalogService,
+  PricingService,
+  Sent,
+  createCheckedAddress,
 } from './implementation.types';
 import { placeOrder } from './implementation';
 
@@ -57,55 +60,73 @@ class HttpResponse {
 /// An API takes a HttpRequest as input and returns a async response
 type PlaceOrderApi = (i: HttpRequest) => Promise<HttpResponse>;
 
+const fromEither = <E, A>(either: E.Either<E, A>) =>
+  either._tag === 'Left'
+    ? Effect.fail(either.left)
+    : Effect.succeed(either.right);
+
 // =============================
 // Implementation
 // =============================
 
 // setup dummy dependencies
 
-export const checkProductExists: CheckProductCodeExists = productCode => true; // dummy implementation
+export const ProductCatalogLive = Layer.succeed(ProductCatalogService, {
+  check: () => Effect.succeed(true),
+});
 
-export const checkAddressExists: CheckAddressExists = flow(createCheckedAddress, E.right, TE.fromEither);
+export const AddressVerificationLive = Layer.succeed(AddressVerificationService, {
+  check: flow(createCheckedAddress, Effect.succeed),
+});
 
-export const getProductPrice: GetProductPrice = productCode => Price.unsafeCreate(1); // dummy implementation
+export const PricingLive = Layer.succeed(PricingService, {
+  getPrice: () => Effect.succeed(Price.unsafeCreate(1)),
+});
 
-export const createOrderAcknowledgmentLetter: CreateOrderAcknowledgmentLetter = pricedOrder =>
-  new HtmlString('some text'); // dummy implementation
+export const OrderAcknowledgmentLetterLive = Layer.succeed(OrderAcknowledgmentLetterService, {
+  create: () => Effect.succeed(new HtmlString('some text')),
+});
 
-export const sendOrderAcknowledgment: SendOrderAcknowledgment = orderAcknowledgement => Sent;
+export const OrderAcknowledgmentSenderLive = Layer.succeed(OrderAcknowledgmentSenderService, {
+  send: () => Effect.succeed(Sent),
+});
 
 // -------------------------------
 // workflow
 // -------------------------------
 
-export const placeOrderApi: PlaceOrderApi = (request: HttpRequest) => pipe(
-  request.body,             // orderFormJson
-  Json.deserialize(OrderFormDto), // following the approach in "A Complete Serialization Pipeline" in chapter 11
-  (orderForm) => orderForm.toUnvalidatedOrder(), // convert to domain object
-  TE.of,
-  TE.flatMap(
-    // now we are in the pure domain
-    placeOrder(
-      // setup the dependencies. See "Injecting Dependencies" in chapter 9
-      checkProductExists,
-      checkAddressExists,
-      getProductPrice,
-      createOrderAcknowledgmentLetter,
-      sendOrderAcknowledgment,
+export const placeOrderApi: PlaceOrderApi = (request: HttpRequest) => {
+  const workflow = pipe(
+    fromEither(
+      E.tryCatch(
+        () => pipe(request.body, Json.deserialize(OrderFormDto)),
+        e => e as Error,
+      ),
     ),
-  ),
-)().then(
-  // now convert from the pure domain back to a HttpResponse
-  E.match(
-    flow(
-      PlaceOrderErrorDto.fromDomain,
-      Json.serialize,
-      json => new HttpResponse(401, json),
-    ),
-    flow(
-      A.map(placeOrderEventDtoFromDomain),
-      Json.serialize,
-      json => new HttpResponse(200, json),
-    ),
-  ),
-)
+    Effect.map(orderForm => orderForm.toUnvalidatedOrder()),
+    Effect.mapError(ValidationError.from),
+    Effect.flatMap(placeOrder),
+    Effect.match({
+      onFailure: flow(
+        PlaceOrderErrorDto.fromDomain,
+        Json.serialize,
+        json => new HttpResponse(401, json),
+      ),
+      onSuccess: flow(
+        A.map(placeOrderEventDtoFromDomain),
+        Json.serialize,
+        json => new HttpResponse(200, json),
+      ),
+    }),
+  );
+
+  const liveEnvironment = Layer.mergeAll(
+    ProductCatalogLive,
+    AddressVerificationLive,
+    PricingLive,
+    OrderAcknowledgmentLetterLive,
+    OrderAcknowledgmentSenderLive,
+  );
+
+  return Effect.runPromise(Effect.provide(workflow, liveEnvironment));
+};
