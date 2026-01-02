@@ -2,10 +2,11 @@
 // rather than a module at the top level
 // namespace OrderTaking.PlaceOrder
 
+import { Effect } from 'effect';
 import * as O from 'fp-ts/Option';
-import { TaskEither } from 'fp-ts/TaskEither';
 import { bound } from '../../libs/decorator';
 import { Entity, ValueObject } from '../../libs/model-type';
+import type { PlaceOrderEnv } from './implementation.types';
 
 import type {
   Address,
@@ -191,4 +192,4 @@ export type PlaceOrderError = ValidationError | PricingError | RemoteServiceErro
 // ------------------------------------
 // the workflow itself
 
-export type PlaceOrder = (i: UnvalidatedOrder) => TaskEither<PlaceOrderError, PlaceOrderEvent[]>;
+export type PlaceOrder = (i: UnvalidatedOrder) => Effect.Effect<PlaceOrderEvent[], PlaceOrderError, PlaceOrderEnv>;

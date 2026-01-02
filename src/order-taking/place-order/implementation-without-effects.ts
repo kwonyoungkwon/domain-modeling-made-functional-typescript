@@ -3,9 +3,10 @@ import * as E from 'fp-ts/Either';
 import * as O from 'fp-ts/Option';
 import { flow, pipe } from 'fp-ts/function';
 import * as Common from '../common-types';
-import { placeOrderEvents } from './implementation.common';
+import { createEvents } from './implementation.common';
 import { ValidatedOrder, ValidatedOrderLine } from './implementation.types';
-import { PricedOrder, PricedOrderLine } from './public-types';
+import { NotSent, OrderAcknowledgement, Sent } from './implementation.types';
+import { OrderAcknowledgmentSent, PricedOrder, PricedOrderLine } from './public-types';
 
 import type {
   CheckedAddress,
@@ -240,6 +241,17 @@ const priceOrder: PriceOrder = getProductPrice => validatedOrder => {
   );
 };
 
+const acknowledgeOrder = (
+  createAck: CreateOrderAcknowledgmentLetter,
+  sendAck: SendOrderAcknowledgment,
+) => (pricedOrder: PricedOrder) => {
+  const letter = createAck(pricedOrder);
+  const acknowledgment = new OrderAcknowledgement(pricedOrder.customerInfo.emailAddress, letter);
+  return sendAck(acknowledgment) === Sent
+    ? O.some(new OrderAcknowledgmentSent(pricedOrder.orderId, pricedOrder.customerInfo.emailAddress))
+    : O.none;
+};
+
 // ---------------------------
 // overall workflow
 // ---------------------------
@@ -253,5 +265,8 @@ const placeOrder = (
 ): PlaceOrderWithoutEffects => flow(
   validateOrder(checkCode, checkAddress),
   priceOrder(getPrice),
-  placeOrderEvents(createAck, sendAck),
+  pricedOrder => {
+    const ackOpt = acknowledgeOrder(createAck, sendAck)(pricedOrder);
+    return createEvents(pricedOrder, ackOpt);
+  },
 );
